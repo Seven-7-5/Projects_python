@@ -1,0 +1,282 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import requests
+import datetime
+
+# ====================== 配置区 ======================
+QWEATHER_API_HOST = "kk436kqabb.re.qweatherapi.com"
+# 请填入项目管理中查到的API Key
+QWEATHER_API_KEY = "dbb3ddf1bc9c498e88df41b969a0eee2"
+# 实时天气自动刷新间隔（毫秒）
+AUTO_REFRESH_INTERVAL = 15 * 60 * 1000
+# ===================================================
+
+# 接口地址
+GEO_API = f"https://{QWEATHER_API_HOST}/geo/v2/city/lookup"
+WEATHER_NOW_API = f"https://{QWEATHER_API_HOST}/v7/weather/now"
+WEATHER_7D_API = f"https://{QWEATHER_API_HOST}/v7/weather/7d"
+IP_LOCATE_API = "http://ip-api.com/json/?lang=zh-CN"
+
+
+def get_city_info(city_name: str):
+    params = {"location": city_name, "key": QWEATHER_API_KEY, "lang": "zh"}
+    try:
+        resp = requests.get(GEO_API, params=params, timeout=8)
+        data = resp.json()
+        if data["code"] == "200":
+            city = data["location"][0]
+            return city["id"], f"{city['adm1']} {city['name']}"
+        elif data["code"] == "401":
+            messagebox.showerror("认证失败", "API Key无效，请检查项目管理中的密钥")
+        return None, None
+    except requests.exceptions.RequestException:
+        messagebox.showerror("网络错误", "请检查网络连接")
+        return None, None
+
+
+def get_realtime_weather(city_id: str):
+    params = {"location": city_id, "key": QWEATHER_API_KEY, "lang": "zh"}
+    try:
+        resp = requests.get(WEATHER_NOW_API, params=params, timeout=8)
+        data = resp.json()
+        if data["code"] == "200":
+            return data["now"], data["updateTime"]
+        return None, None
+    except requests.exceptions.RequestException:
+        messagebox.showerror("网络错误", "实时天气数据获取失败")
+        return None, None
+
+
+def get_7d_forecast(city_id: str):
+    params = {"location": city_id, "key": QWEATHER_API_KEY, "lang": "zh"}
+    try:
+        resp = requests.get(WEATHER_7D_API, params=params, timeout=8)
+        data = resp.json()
+        if data["code"] == "200":
+            return data["daily"]
+        return None
+    except requests.exceptions.RequestException:
+        messagebox.showerror("网络错误", "预报数据获取失败")
+        return None
+
+
+def auto_locate_city():
+    try:
+        resp = requests.get(IP_LOCATE_API, timeout=5)
+        data = resp.json()
+        if data["status"] == "success":
+            return data["city"]
+        return None
+    except requests.exceptions.RequestException:
+        return None
+
+
+class WeatherApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("官方气象数据查询系统")
+        self.geometry("700x580")
+        self.minsize(620, 520)
+
+        self.current_city_id = None
+        self.current_city_name = ""
+        self.forecast_data = {}
+        self.refresh_job = None
+        self.auto_refresh = True
+
+        self._build_ui()
+        self._toggle_auto_refresh()
+
+    def _build_ui(self):
+        tk.Label(
+            self, text="官方气象数据查询系统",
+            font=("微软雅黑", 16, "bold")
+        ).pack(pady=10)
+
+        # 城市选择区
+        city_frame = ttk.LabelFrame(self, text="城市选择")
+        city_frame.pack(fill="x", padx=25, pady=6)
+
+        ttk.Label(city_frame, text="城市名称：").pack(side="left", padx=10, pady=12)
+        self.city_entry = ttk.Entry(city_frame, width=22)
+        self.city_entry.pack(side="left", padx=5)
+        self.city_entry.insert(0, "南京")
+
+        ttk.Button(city_frame, text="自动定位", command=self._on_auto_locate).pack(side="left", padx=6)
+        ttk.Button(city_frame, text="确认查询", command=self._on_confirm_city).pack(side="left", padx=6)
+
+        # 标签页
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=20, pady=8)
+
+        # 实时天气页
+        self.tab_now = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_now, text="实时天气")
+        self._init_now_tab()
+
+        # 7天预报页
+        self.tab_forecast = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_forecast, text="未来7天预报")
+        self._init_forecast_tab()
+
+        # 底部状态栏
+        self.status_var = tk.StringVar(value="数据来源：和风天气 正规气象数据源")
+        tk.Label(
+            self, textvariable=self.status_var,
+            fg="#666", font=("微软雅黑", 9)
+        ).pack(pady=6)
+
+    def _init_now_tab(self):
+        tool_bar = ttk.Frame(self.tab_now)
+        tool_bar.pack(fill="x", padx=20, pady=10)
+
+        self.auto_refresh_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            tool_bar, text="自动刷新（15分钟）",
+            variable=self.auto_refresh_var,
+            command=self._toggle_auto_refresh
+        ).pack(side="left")
+
+        ttk.Button(tool_bar, text="立即刷新", command=self._refresh_now).pack(side="right")
+
+        self.now_text = tk.Text(
+            self.tab_now, font=("微软雅黑", 12),
+            wrap="word", bg="#f5f7fa", bd=0
+        )
+        self.now_text.pack(fill="both", expand=True, padx=20, pady=10)
+        self.now_text.config(state="disabled")
+
+    def _init_forecast_tab(self):
+        select_bar = ttk.Frame(self.tab_forecast)
+        select_bar.pack(fill="x", padx=20, pady=10)
+
+        ttk.Label(select_bar, text="选择日期：").pack(side="left")
+        self.date_combo = ttk.Combobox(select_bar, state="readonly", width=20)
+        self.date_combo.pack(side="left", padx=5)
+        self.date_combo.bind("<<ComboboxSelected>>", self._show_forecast_detail)
+
+        self.forecast_text = tk.Text(
+            self.tab_forecast, font=("微软雅黑", 11),
+            wrap="word", bg="#f5f7fa", bd=0
+        )
+        self.forecast_text.pack(fill="both", expand=True, padx=20, pady=10)
+        self.forecast_text.config(state="disabled")
+
+    def _on_auto_locate(self):
+        city = auto_locate_city()
+        if city:
+            self.city_entry.delete(0, tk.END)
+            self.city_entry.insert(0, city)
+            messagebox.showinfo("定位成功", f"已自动定位到：{city}")
+        else:
+            messagebox.showwarning("定位失败", "自动定位失败，请手动输入城市名称")
+
+    def _on_confirm_city(self):
+        city_name = self.city_entry.get().strip()
+        if not city_name:
+            messagebox.showwarning("提示", "请输入或定位城市名称")
+            return
+
+        city_id, city_full = get_city_info(city_name)
+        if not city_id:
+            return
+
+        self.current_city_id = city_id
+        self.current_city_name = city_full
+        self.status_var.set(f"当前城市：{city_full} | 数据来源：正规气象数据源")
+
+        self._refresh_now()
+        self._load_forecast()
+
+    def _toggle_auto_refresh(self):
+        self.auto_refresh = self.auto_refresh_var.get()
+        if self.refresh_job:
+            self.after_cancel(self.refresh_job)
+            self.refresh_job = None
+        if self.auto_refresh and self.current_city_id:
+            self._schedule_refresh()
+
+    def _schedule_refresh(self):
+        self.refresh_job = self.after(AUTO_REFRESH_INTERVAL, self._auto_refresh_task)
+
+    def _auto_refresh_task(self):
+        if self.auto_refresh and self.current_city_id:
+            self._refresh_now(silent=True)
+            self._schedule_refresh()
+
+    def _refresh_now(self, silent=False):
+        if not self.current_city_id:
+            if not silent:
+                messagebox.showwarning("提示", "请先选择城市")
+            return
+
+        now_data, update_time = get_realtime_weather(self.current_city_id)
+        if not now_data:
+            return
+
+        update_dt = datetime.datetime.fromisoformat(update_time.replace("+08:00", ""))
+        update_str = update_dt.strftime("%Y-%m-%d %H:%M")
+
+        content = f"""📍 当前城市：{self.current_city_name}
+⏰ 数据更新时间：{update_str}
+
+🌤️  天气状况：{now_data.get('text', '无数据')}
+🌡️  当前温度：{now_data.get('temp', '--')} ℃
+🤒 体感温度：{now_data.get('feelsLike', '--')} ℃
+💧 相对湿度：{now_data.get('humidity', '--')} %
+🌬️ 风向：{now_data.get('windDir', '--')}
+💨 风力：{now_data.get('windScale', '--')} 级 / {now_data.get('windSpeed', '--')} km/h
+🌡️  大气压强：{now_data.get('pressure', '--')} 百帕
+🌧️ 降水量：{now_data.get('precip', '--')} mm
+🌫️ 能见度：{now_data.get('vis', '--')} 公里
+☁️  云量：{now_data.get('cloud', '--')} %"""
+
+        self.now_text.config(state="normal")
+        self.now_text.delete(1.0, tk.END)
+        self.now_text.insert(tk.END, content)
+        self.now_text.config(state="disabled")
+
+    def _load_forecast(self):
+        daily_list = get_7d_forecast(self.current_city_id)
+        if not daily_list:
+            return
+
+        self.forecast_data = {day["fxDate"]: day for day in daily_list}
+        dates = list(self.forecast_data.keys())
+        self.date_combo["values"] = dates
+        self.date_combo.current(0)
+        self._show_forecast_detail()
+
+    def _show_forecast_detail(self, event=None):
+        selected_date = self.date_combo.get()
+        if not selected_date or not self.forecast_data:
+            return
+
+        day = self.forecast_data[selected_date]
+        content = f"""📍 查询城市：{self.current_city_name}
+📅 查询日期：{selected_date}
+
+🌤️  白天天气：{day.get('textDay', '无数据')}
+🌙 夜间天气：{day.get('textNight', '无数据')}
+🌡️  最高温度：{day.get('tempMax', '--')} ℃
+🌡️  最低温度：{day.get('tempMin', '--')} ℃
+💧 相对湿度：{day.get('humidity', '--')} %
+🌬️ 白天风向：{day.get('windDirDay', '--')} {day.get('windScaleDay', '--')} 级
+🌙 夜间风向：{day.get('windDirNight', '--')} {day.get('windScaleNight', '--')} 级
+☀️ 紫外线强度：{day.get('uvIndex', '--')}
+🌧️ 降水量：{day.get('precip', '--')} mm
+🌅 日出：{day.get('sunrise', '--')}
+🌇 日落：{day.get('sunset', '--')}"""
+
+        self.forecast_text.config(state="normal")
+        self.forecast_text.delete(1.0, tk.END)
+        self.forecast_text.insert(tk.END, content)
+        self.forecast_text.config(state="disabled")
+
+
+if __name__ == "__main__":
+    if QWEATHER_API_KEY == "在这里粘贴你的API Key":
+        print("错误：请先在代码顶部填入项目管理中的API Key")
+    else:
+        app = WeatherApp()
+        app.mainloop()
